@@ -10,7 +10,6 @@
     const cfg = HFS.getPluginConfig() || {};
     const defaultEncoding = cfg.encoding || 'utf-8';
 
-    // 總開關：cache 相關功能全部關閉
     const CACHE_ENABLED = cfg.autoBackup !== false;
 
     const API = '/~/api/doc-viewer/';
@@ -28,6 +27,28 @@
         { value: 'latin1', label: 'Latin-1', hint: 'Latin-1 / Windows-1252 (ANSI, Western)' },
     ];
 
+    // ============================================================
+    // 硬編碼的「Doc-viewer 支持的全部格式」—— 用於右鍵菜單 Edit
+    // 包含 html / htm / xhtml，因為右鍵點擊是顯式意圖
+    // ============================================================
+    const ALL_SUPPORTED_EXTS = [
+        'txt', 'log', 'nfo', 'readme', 'rtf', 'md', 'markdown', 'tex',
+        'json', 'xml', 'csv', 'tsv', 'yml', 'yaml', 'ini', 'cfg', 'conf',
+        'config', 'properties', 'env', 'toml', 'lock', 'srt', 'vtt', 'ass',
+        'ssa', 'sub', 'template', 'spec', 'webapp', 'arg', 'gitignore',
+        'gitattributes', 'editorconfig', 'dockerignore', 'gradle', 'makefile',
+        'mk', 'css', 'scss', 'sass', 'less', 'js', 'mjs', 'cjs', 'ts',
+        'jsx', 'tsx', 'py', 'rb', 'php', 'pl', 'lua', 'sh', 'bash', 'zsh',
+        'fish', 'bat', 'cmd', 'ps1', 'c', 'h', 'cpp', 'hpp', 'cc', 'hxx',
+        'java', 'kt', 'swift', 'go', 'rs', 'sql', 'graphql', 'gql',
+        'html', 'htm', 'xhtml',
+        'gcode',
+    ];
+
+    // ============================================================
+    // 從配置解析「圖標攔截允許的擴展名」—— 用於點擊圖標打開
+    // 默認不含 html / htm / xhtml，管理員可手動加入
+    // ============================================================
     const DEFAULT_EDITABLE_EXTS = [
         'txt', 'log', 'nfo', 'readme', 'rtf', 'md', 'markdown', 'tex',
         'json', 'xml', 'csv', 'tsv', 'yml', 'yaml', 'ini', 'cfg', 'conf',
@@ -59,12 +80,31 @@
             .map(x => x.startsWith('.') ? x.slice(1) : x);
     }
 
-    const EDITABLE_EXTS = parseEditableExts(cfg.editableExts);
-    const DOC_EXT_RE = EDITABLE_EXTS.length > 0
-        ? new RegExp('\\.(?:' + EDITABLE_EXTS.map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')$', 'i')
-        : null;
+    function buildExtRe(exts) {
+        if (!exts || exts.length === 0) return null;
+        return new RegExp(
+            '\\.(?:' + exts.map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')$',
+            'i'
+        );
+    }
 
-    function isDocName(name) {
+    // 用於右鍵菜單 Edit / 文件大小檢查（含 html/htm/xhtml）
+    const ALL_EXT_RE = buildExtRe(ALL_SUPPORTED_EXTS);
+
+    // 用於圖標攔截（不含 html/htm/xhtml，除非配置加了）
+    const EDITABLE_EXTS = parseEditableExts(cfg.editableExts);
+    const DOC_EXT_RE = buildExtRe(EDITABLE_EXTS);
+
+    // isSupportedDocName：判斷是否為 Doc-viewer 支持的任一格式（含 html/htm/xhtml）
+    // → 用於右鍵菜單、文件大小超限提示
+    function isSupportedDocName(name) {
+        if (typeof name !== 'string' || !ALL_EXT_RE) return false;
+        return ALL_EXT_RE.test(name);
+    }
+
+    // isIconHijackable：判斷圖標是否應該被攔截
+    // → 用於圖標點擊攔截
+    function isIconHijackable(name) {
         if (typeof name !== 'string' || !DOC_EXT_RE) return false;
         return DOC_EXT_RE.test(name);
     }
@@ -93,7 +133,6 @@
         try { await apiPost('clearDraft', { uri }); } catch {}
     }
 
-    // 靜默 lazy cleanup（總開關關閉時不發請求）
     function silentLazyCleanup(uri) {
         if (!uri) return;
         if (!CACHE_ENABLED) return;
@@ -195,7 +234,7 @@
     }
 
     // ============================================================
-    // 圖標攔截
+    // 圖標攔截（只針對 cfg.editableExts）
     // ============================================================
     const IconHijack = {
         hijackedIcons: new WeakSet(),
@@ -278,7 +317,7 @@
             for (const li of fileItems) {
                 const a = li.querySelector('a[href]');
                 const name = a?.textContent?.trim();
-                if (name && isDocName(name)) return true;
+                if (name && isIconHijackable(name)) return true;
             }
             return false;
         },
@@ -290,7 +329,7 @@
             for (const li of fileItems) {
                 const a = li.querySelector('a[href]');
                 const name = a?.textContent?.trim();
-                if (!name || !isDocName(name)) continue;
+                if (!name || !isIconHijackable(name)) continue;
                 const icon = li.querySelector('span.icon, [class*="media-icon"]');
                 if (!icon) continue;
                 li.dataset.dvIconHijacked = 'true';
@@ -337,7 +376,7 @@
                 const a = target.querySelector('a[href]');
                 if (!a) return;
                 const name = a.textContent?.trim();
-                if (!name || !isDocName(name)) return;
+                if (!name || !isIconHijackable(name)) return;
                 const icon = target.querySelector('span.icon, [class*="media-icon"]');
                 if (!icon || !icon.contains(e.target)) return;
                 e.preventDefault();
@@ -667,10 +706,6 @@
         );
     }
 
-    // ============================================================
-    // 編輯器對話框
-    // CACHE_ENABLED = false 時：不顯示 History，不寫草稿，不發 lazyCleanup
-    // ============================================================
     function openEditorDialog(ent) {
         let dialog;
         const dialogDescriptor = {
@@ -743,7 +778,7 @@
                     let cancelled = false;
                     const nonce = ++reloadNonceRef.current;
                     setLoading(true);
-                    silentLazyCleanup(uri);
+                    // 打開時不觸發 lazyCleanup（避免創建 cache）
                     fetch(uri + (uri.includes('?') ? '&' : '?') + '_=' + Date.now(), { cache: 'no-store' })
                         .then(res => {
                             if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -786,23 +821,27 @@
                     return () => { cancelled = true; };
                 }, [uri, encoding]);
 
-                // 定時 lazy cleanup（只在 cache 開啟時）
+                // 定時 lazy cleanup：只在 dirty 時啟動
                 r.useEffect(() => {
                     if (loading) return;
                     if (!uri) return;
                     if (!CACHE_ENABLED) return;
+                    if (!dirty) return;
                     const id = setInterval(() => {
                         if (closedRef.current) return;
+                        if (!dirtyRef.current) return;
                         silentLazyCleanup(uri);
                     }, AUTO_CLEANUP_INTERVAL_MS);
                     return () => clearInterval(id);
-                }, [loading, uri]);
+                }, [loading, uri, dirty]);
 
-                // 關閉保底清理（只在 cache 開啟時）
+                // 關閉保底清理：只在 dirty 過時觸發
                 r.useEffect(() => {
                     return () => {
                         closedRef.current = true;
-                        if (CACHE_ENABLED && uri) silentLazyCleanup(uri);
+                        if (CACHE_ENABLED && uri && dirtyRef.current) {
+                            silentLazyCleanup(uri);
+                        }
                     };
                 }, [uri]);
 
@@ -1135,7 +1174,6 @@
 
                 return HFS.h('div', { className: 'dv-workspace' }, [
                     HFS.h('span', { key: 'title-actions', className: 'dv-title-actions' }, [
-                        // History 按鈕：只在 cache 開啟時顯示
                         CACHE_ENABLED && HFS.h('button', {
                             key: 'history', type: 'button', title: 'History (Versions / Timeline)',
                             className: 'dv-btn dv-btn-wide',
@@ -1266,6 +1304,10 @@
         setTimeout(setupFullscreenDialog, 300);
     }
 
+    // ============================================================
+    // 右鍵菜單：對「所有 Doc-viewer 支持的格式」顯示 Edit
+    // 包括 html / htm / xhtml（即使它們默認不在 editableExts 中）
+    // ============================================================
     HFS.onEvent('fileMenu', ({ entry: ent }) => {
         const showCreateFile = ent.isFolder && ent.uri === location.pathname && HFS.state.props.can_upload;
         if (ent.isFolder && !showCreateFile) return;
@@ -1273,7 +1315,8 @@
 
         if (!ent.isFolder && Number(ent.s) > limit) {
             const name = ent.n || ent.name || '';
-            if (isDocName(name)) {
+            // 用「完整支持列表」判斷是否顯示「文件太大」提示
+            if (isSupportedDocName(name)) {
                 return {
                     label: 'Edit (too large)', icon: 'edit',
                     onClick() { alert('File too large to edit (' + formatBytes(ent.s) + '). Limit: ' + (limit / 1024 / 1024) + ' MB.'); },
@@ -1310,7 +1353,8 @@
             };
         }
 
-        if (!isDocName(ent.n || ent.name || '')) return;
+        // 用「完整支持列表」判斷是否顯示 Edit（含 html/htm/xhtml）
+        if (!isSupportedDocName(ent.n || ent.name || '')) return;
 
         return {
             label: 'Edit',
@@ -1389,7 +1433,6 @@
 
     HFS.onEvent('configChanged', (newCfg) => {
         if (!newCfg) return;
-        // 總開關變更 → 提示重載
         if ('autoBackup' in newCfg) {
             const newCacheEnabled = newCfg.autoBackup !== false;
             if (newCacheEnabled !== CACHE_ENABLED) {
@@ -1411,12 +1454,15 @@
     });
 
     window.DocViewer = {
-        version: '8.5.0',
+        version: '8.6.0',
         config: cfg,
         cacheEnabled: CACHE_ENABLED,
         editableExts: EDITABLE_EXTS,
+        supportedExts: ALL_SUPPORTED_EXTS,
         openEditorDialog,
         IconHijack,
     };
-    console.log('[doc-viewer] loaded, version 8.5.0, cacheEnabled:', CACHE_ENABLED, 'editableExts:', EDITABLE_EXTS);
+    console.log('[doc-viewer] loaded, version 8.6.0, cacheEnabled:', CACHE_ENABLED,
+        'supported:', ALL_SUPPORTED_EXTS.length,
+        'iconHijack:', EDITABLE_EXTS.length);
 }

@@ -5,7 +5,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const crypto = require('crypto');
 
-exports.version = 7.2;
+exports.version = 7.4;
 exports.apiRequired = 8.87;
 exports.repo = "Hug3O/Doc-viewer";
 exports.description = "Text editor with fullscreen dialog, saved versions, unified timeline, VSCode theme. Metadata lives next to the file in cache/docviewer/, keyed by filename (no hashes).";
@@ -45,7 +45,6 @@ exports.config = {
         ],
     },
 
-    // ===== 總開關：關閉後以下所有選項都隱藏，且不產生任何 cache 文件 =====
     autoBackup: {
         frontend: true,
         type: 'boolean',
@@ -54,7 +53,6 @@ exports.config = {
         helperText: 'Master switch. When OFF: no cache folder is created, no versions, no drafts, no physical backups, no action log. The editor becomes a plain read/edit/save tool.',
     },
 
-    // ===== 以下選項只在 autoBackup 開啟時顯示 =====
     versionHistoryLimit: {
         showIf: x => x.autoBackup !== false,
         frontend: true, type: 'number', label: 'Version History Limit (unlocked)',
@@ -84,11 +82,12 @@ exports.config = {
 };
 
 exports.changelog = [
-    { version: 7.2, message: "autoBackup is now the master switch: when OFF, no cache folder is created at all (no versions/drafts/actions/physical backups). Related options are hidden. Orphan sweep is now built-in (no longer configurable)." },
-    { version: 7.1, message: "Metadata directories are now keyed by filename (not MD5). Orphan cleanup and manual inspection are trivial: the directory name IS the filename." },
-    { version: 7.0, message: "Metadata lives next to the file in cache/docviewer/, not in storage/. Lazy cleanup on file open. Version content is plain UTF-8 text, no more base64." },
-    { version: 6.9, message: "Editable extensions are now configurable (html/htm/xhtml excluded by default to preserve native browser preview)." },
-    { version: 6.8, message: "Add saveEncoded API for ANSI (GBK/Big5/Latin-1) saving via iconv-lite." },
+    { version: 7.3, message: "Read-only operations (open, History, lazy cleanup) no longer create cache/docviewer/. The folder is only created when the first write happens (save, draft snapshot, record version)." },
+    { version: 7.2, message: "autoBackup is now the master switch: when OFF, no cache folder is created at all. Related options are hidden. Orphan sweep is built-in." },
+    { version: 7.1, message: "Metadata directories are now keyed by filename (not MD5)." },
+    { version: 7.0, message: "Metadata lives next to the file in cache/docviewer/. Lazy cleanup on file open. Version content is plain UTF-8 text." },
+    { version: 6.9, message: "Editable extensions are configurable." },
+    { version: 6.8, message: "Add saveEncoded API for ANSI saving." },
 ];
 
 function parseEditableExts(rawValue) {
@@ -168,7 +167,6 @@ exports.init = async api => {
         return getEditableExts().includes(ext);
     }
 
-    // ===== 總開關：所有 cache 相關操作入口都先檢查 =====
     function isCacheEnabled() {
         return api.getConfig('autoBackup') !== false;
     }
@@ -244,19 +242,29 @@ exports.init = async api => {
         return bestMatch;
     }
 
-    // 只在 cache 開啟時才創建 cacheRoot
-    async function resolveCacheRootByUri(uri) {
+    // ============================================================
+    // 解析 cacheRoot
+    // create: true  → 寫入用，創建目錄
+    // create: false → 讀取用，不創建，不存在返回 null
+    // ============================================================
+    async function resolveCacheRootByUri(uri, opts) {
         if (!isCacheEnabled()) return null;
+        const create = !!(opts && opts.create);
         const realPath = realPathFromUri(uri);
         if (!realPath) return null;
         const realDir = path.dirname(realPath);
         if (!fs.existsSync(realDir)) return null;
         const cacheRoot = path.join(realDir, 'cache', 'docviewer');
-        try {
-            await fsp.mkdir(cacheRoot, { recursive: true });
-        } catch {
-            return null;
+        if (create) {
+            try {
+                await fsp.mkdir(cacheRoot, { recursive: true });
+            } catch {
+                return null;
+            }
+            return cacheRoot;
         }
+        // 只讀：不創建
+        if (!fs.existsSync(cacheRoot)) return null;
         return cacheRoot;
     }
 
@@ -282,7 +290,7 @@ exports.init = async api => {
     }
 
     // ============================================================
-    // 物理備份（cache/docbak）
+    // 物理備份（cache/docbak）— 寫入類，創建目錄
     // ============================================================
     async function copyFileRetry(src, dst) {
         try {
@@ -331,7 +339,8 @@ exports.init = async api => {
 
     async function recordVersionFromContent(uri, content) {
         if (!isCacheEnabled()) return { ok: false, reason: 'cache disabled' };
-        const cacheRoot = await resolveCacheRootByUri(uri);
+        // 寫入類 → create: true
+        const cacheRoot = await resolveCacheRootByUri(uri, { create: true });
         if (!cacheRoot) return { ok: false, reason: 'no cache root; open the file through the browser first' };
 
         const buf = Buffer.from(content, 'utf8');
@@ -376,7 +385,8 @@ exports.init = async api => {
     }
 
     async function getVersionContent(uri, id) {
-        const cacheRoot = await resolveCacheRootByUri(uri);
+        // 讀取類 → create: false
+        const cacheRoot = await resolveCacheRootByUri(uri, { create: false });
         if (!cacheRoot) throw new Error('no cache root');
         const dir = versionsDir(cacheRoot, uri);
         return await fsp.readFile(path.join(dir, id + '.txt'), 'utf8');
@@ -387,7 +397,8 @@ exports.init = async api => {
     // ============================================================
     async function saveDraft(uri, content) {
         if (!isCacheEnabled()) return;
-        const cacheRoot = await resolveCacheRootByUri(uri);
+        // 寫入類 → create: true
+        const cacheRoot = await resolveCacheRootByUri(uri, { create: true });
         if (!cacheRoot) return;
         try {
             const dir = draftsDir(cacheRoot, uri);
@@ -448,7 +459,8 @@ exports.init = async api => {
 
     async function loadDraft(uri) {
         if (!isCacheEnabled()) return null;
-        const cacheRoot = await resolveCacheRootByUri(uri);
+        // 讀取類 → create: false
+        const cacheRoot = await resolveCacheRootByUri(uri, { create: false });
         if (!cacheRoot) return null;
         try {
             const dir = draftsDir(cacheRoot, uri);
@@ -466,7 +478,8 @@ exports.init = async api => {
 
     async function clearDraft(uri) {
         if (!isCacheEnabled()) return;
-        const cacheRoot = await resolveCacheRootByUri(uri);
+        // 刪除類 → create: false（不存在就無事可做）
+        const cacheRoot = await resolveCacheRootByUri(uri, { create: false });
         if (!cacheRoot) return;
         try {
             await fsp.rm(draftsDir(cacheRoot, uri), { recursive: true, force: true });
@@ -474,7 +487,8 @@ exports.init = async api => {
     }
 
     async function getDraftSnapshot(uri, id) {
-        const cacheRoot = await resolveCacheRootByUri(uri);
+        // 讀取類 → create: false
+        const cacheRoot = await resolveCacheRootByUri(uri, { create: false });
         if (!cacheRoot) throw new Error('no cache root');
         const dir = draftsDir(cacheRoot, uri);
         const meta = JSON.parse(await fsp.readFile(path.join(dir, 'snap_' + id + '.meta.json'), 'utf8'));
@@ -508,14 +522,15 @@ exports.init = async api => {
     }
 
     // ============================================================
-    // Lazy 清理（內置功能，無配置開關）
+    // Lazy 清理（讀取類：不創建 cache，若不存在直接返回）
     // ============================================================
     async function lazyCleanupForUri(uri) {
         if (!isCacheEnabled()) return;
         try {
             const realPath = realPathFromUri(uri);
             if (!realPath) return;
-            const cacheRoot = await resolveCacheRootByUri(uri);
+            // create: false → 若 cache 不存在，直接返回，不創建
+            const cacheRoot = await resolveCacheRootByUri(uri, { create: false });
             if (!cacheRoot) return;
 
             // 1. 物理檔案不存在 → 刪除整個 cache/docviewer 下的條目
@@ -562,7 +577,7 @@ exports.init = async api => {
     }
 
     // ============================================================
-    // 全局孤兒清理（僅供 API / 手動調用，不暴露前端按鈕）
+    // 全局孤兒清理
     // ============================================================
     let cleaningInProgress = false;
     async function cleanOrphanedCache() {
@@ -637,7 +652,6 @@ exports.init = async api => {
     // API
     // ============================================================
     async function handleApi(ctx, method, params) {
-        // 總開關關閉時，所有 cache 寫入類 API 直接返回「未啟用」
         const cacheReadOnly = !isCacheEnabled();
 
         if (method === 'recordVersion') {
@@ -689,7 +703,8 @@ exports.init = async api => {
             const uri = params.uri;
             if (!uri) { ctx.status = 400; ctx.body = { ok: false }; return; }
             if (cacheReadOnly) { ctx.status = 200; ctx.body = { ok: true, items: [] }; return; }
-            const cacheRoot = await resolveCacheRootByUri(uri);
+            // 讀取類 → create: false
+            const cacheRoot = await resolveCacheRootByUri(uri, { create: false });
             if (!cacheRoot) { ctx.status = 200; ctx.body = { ok: true, items: [] }; return; }
             const items = [];
             const snaps = await listDraftSnapshots(cacheRoot, uri);
@@ -709,7 +724,8 @@ exports.init = async api => {
             const uri = params.uri;
             if (!uri) { ctx.status = 400; ctx.body = { ok: false }; return; }
             if (cacheReadOnly) { ctx.status = 200; ctx.body = { ok: true, versions: [] }; return; }
-            const cacheRoot = await resolveCacheRootByUri(uri);
+            // 讀取類 → create: false
+            const cacheRoot = await resolveCacheRootByUri(uri, { create: false });
             if (!cacheRoot) { ctx.status = 200; ctx.body = { ok: true, versions: [] }; return; }
             const idx = await loadVersionIndex(cacheRoot, uri);
             ctx.status = 200;
@@ -731,7 +747,8 @@ exports.init = async api => {
             if (cacheReadOnly) { ctx.status = 200; ctx.body = { ok: false, reason: 'cache disabled' }; return; }
             const { uri, id, label, starred, locked } = params;
             if (!uri || !id) { ctx.status = 400; ctx.body = { ok: false }; return; }
-            const cacheRoot = await resolveCacheRootByUri(uri);
+            // 寫入類 → create: true（確保 index.json 所在目錄存在）
+            const cacheRoot = await resolveCacheRootByUri(uri, { create: true });
             if (!cacheRoot) { ctx.status = 404; ctx.body = { ok: false }; return; }
             const idx = await loadVersionIndex(cacheRoot, uri);
             const v = idx.versions.find(x => x.id === id);
@@ -749,7 +766,8 @@ exports.init = async api => {
             if (cacheReadOnly) { ctx.status = 200; ctx.body = { ok: false, reason: 'cache disabled' }; return; }
             const { uri, id } = params;
             if (!uri || !id) { ctx.status = 400; ctx.body = { ok: false }; return; }
-            const cacheRoot = await resolveCacheRootByUri(uri);
+            // 刪除類 → create: false（不存在就不用刪）
+            const cacheRoot = await resolveCacheRootByUri(uri, { create: false });
             if (!cacheRoot) { ctx.status = 404; ctx.body = { ok: false }; return; }
             const idx = await loadVersionIndex(cacheRoot, uri);
             const v = idx.versions.find(x => x.id === id);
