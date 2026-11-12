@@ -10,13 +10,16 @@
     const cfg = HFS.getPluginConfig() || {};
     const defaultEncoding = cfg.encoding || 'utf-8';
 
+    // 總開關：cache 相關功能全部關閉
+    const CACHE_ENABLED = cfg.autoBackup !== false;
+
     const API = '/~/api/doc-viewer/';
 
-    // B: 高亮自动降级阈值（字符数）
-    const HL_AUTO_MAX = 100000;    // 超过则不自动高亮（用户仍可手动开）
-    const HL_HARD_MAX = 400000;    // 超过则强制纯文本，高亮按钮禁用
-    // C: 视口虚拟化缓冲行数
+    const HL_AUTO_MAX = 100000;
+    const HL_HARD_MAX = 400000;
     const VIEWPORT_BUFFER_LINES = 80;
+
+    const AUTO_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
     const ENCODINGS = [
         { value: 'utf-8', label: 'UTF-8', hint: 'UTF-8 (Unicode)' },
@@ -24,6 +27,47 @@
         { value: 'gbk', label: 'GBK', hint: 'GBK (ANSI, Simplified Chinese)' },
         { value: 'latin1', label: 'Latin-1', hint: 'Latin-1 / Windows-1252 (ANSI, Western)' },
     ];
+
+    const DEFAULT_EDITABLE_EXTS = [
+        'txt', 'log', 'nfo', 'readme', 'rtf', 'md', 'markdown', 'tex',
+        'json', 'xml', 'csv', 'tsv', 'yml', 'yaml', 'ini', 'cfg', 'conf',
+        'config', 'properties', 'env', 'toml', 'lock', 'srt', 'vtt', 'ass',
+        'ssa', 'sub', 'template', 'spec', 'webapp', 'arg', 'gitignore',
+        'gitattributes', 'editorconfig', 'dockerignore', 'gradle', 'makefile',
+        'mk', 'css', 'scss', 'sass', 'less', 'js', 'mjs', 'cjs', 'ts',
+        'jsx', 'tsx', 'py', 'rb', 'php', 'pl', 'lua', 'sh', 'bash', 'zsh',
+        'fish', 'bat', 'cmd', 'ps1', 'c', 'h', 'cpp', 'hpp', 'cc', 'hxx',
+        'java', 'kt', 'swift', 'go', 'rs', 'sql', 'graphql', 'gql',
+        'gcode',
+    ];
+
+    function parseEditableExts(rawValue) {
+        if (rawValue == null) return DEFAULT_EDITABLE_EXTS.slice();
+        if (Array.isArray(rawValue)) {
+            return rawValue
+                .map(x => String(x).trim().toLowerCase())
+                .filter(Boolean)
+                .map(x => x.startsWith('.') ? x.slice(1) : x);
+        }
+        if (typeof rawValue !== 'string') return DEFAULT_EDITABLE_EXTS.slice();
+        const trimmed = rawValue.trim();
+        if (!trimmed) return [];
+        return trimmed
+            .split(/[\s,;]+/)
+            .map(x => x.trim().toLowerCase())
+            .filter(Boolean)
+            .map(x => x.startsWith('.') ? x.slice(1) : x);
+    }
+
+    const EDITABLE_EXTS = parseEditableExts(cfg.editableExts);
+    const DOC_EXT_RE = EDITABLE_EXTS.length > 0
+        ? new RegExp('\\.(?:' + EDITABLE_EXTS.map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')$', 'i')
+        : null;
+
+    function isDocName(name) {
+        if (typeof name !== 'string' || !DOC_EXT_RE) return false;
+        return DOC_EXT_RE.test(name);
+    }
 
     async function apiPost(method, body) {
         const res = await fetch(API + method, {
@@ -36,14 +80,24 @@
     }
 
     async function loadDraft(uri) {
+        if (!CACHE_ENABLED) return null;
         try { const d = await apiPost('getDraft', { uri }); return d.draft || null; }
         catch { return null; }
     }
     async function saveDraft(uri, content) {
+        if (!CACHE_ENABLED) return;
         try { await apiPost('saveDraft', { uri, content }); } catch {}
     }
     async function clearDraft(uri) {
+        if (!CACHE_ENABLED) return;
         try { await apiPost('clearDraft', { uri }); } catch {}
+    }
+
+    // 靜默 lazy cleanup（總開關關閉時不發請求）
+    function silentLazyCleanup(uri) {
+        if (!uri) return;
+        if (!CACHE_ENABLED) return;
+        apiPost('lazyCleanup', { uri }).catch(() => {});
     }
 
     function formatBytes(n) {
@@ -63,15 +117,6 @@
                 ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
         } catch { return ''; }
     }
-    function b64ToUtf8(b64, enc) {
-        try {
-            const bin = atob(b64);
-            const bytes = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-            try { return new TextDecoder(enc || 'utf-8').decode(bytes); }
-            catch { return new TextDecoder('utf-8').decode(bytes); }
-        } catch { return ''; }
-    }
     function decodeBytes(buf, enc) {
         try { return new TextDecoder(enc || 'utf-8').decode(buf); }
         catch { return new TextDecoder('utf-8').decode(buf); }
@@ -86,9 +131,6 @@
         return { chars, lines };
     }
 
-    // ============================================================
-    // 搜索
-    // ============================================================
     function findMatches(value, term) {
         const matches = [];
         if (!value || !term) return matches;
@@ -119,10 +161,6 @@
         return out;
     }
 
-    // ============================================================
-    // C: 视口虚拟化高亮
-    // 输入全文 + 可视行区间，仅高亮该区间，区间外输出等行数占位。
-    // ============================================================
     function buildViewportHighlight(fullText, startLine, endLine, highlighter) {
         if (!highlighter) return escapeHtml(fullText);
         const lines = fullText.split('\n');
@@ -130,19 +168,14 @@
         const s = Math.max(0, Math.min(startLine, total - 1));
         const e = Math.max(s, Math.min(endLine, total - 1));
 
-        // 可视区原文
         const visibleText = lines.slice(s, e + 1).join('\n');
         const visibleHtml = highlighter(visibleText);
 
-        // 占位：用不可见的空行撑高度（用 \n 重复，浏览器会保留空行高度）
         const before = '\n'.repeat(s);
         const after = '\n'.repeat(Math.max(0, total - 1 - e));
         return before + visibleHtml + after;
     }
 
-    // ============================================================
-    // 保存
-    // ============================================================
     async function saveContent(uri, content, encoding) {
         const enc = (encoding || 'utf-8').toLowerCase();
         if (enc === 'utf-8') {
@@ -162,7 +195,202 @@
     }
 
     // ============================================================
-    // HistoryDialog（保持原逻辑，仅 renderList 用 memo 化行组件）
+    // 圖標攔截
+    // ============================================================
+    const IconHijack = {
+        hijackedIcons: new WeakSet(),
+        _observer: null,
+        _hijackTimeoutId: null,
+        _preactHijackerSetup: false,
+        _origDiffed: null,
+        _origCommit: null,
+        _globalInterceptorSetup: false,
+        _openDialog: null,
+
+        findEntryByLink(linkEl) {
+            try {
+                const name = linkEl.textContent?.trim();
+                if (!name) return null;
+                const href = linkEl.getAttribute('href');
+                if (!href) return null;
+                return {
+                    name,
+                    uri: href,
+                    ext: name.split('.').pop().toLowerCase(),
+                    s: null,
+                };
+            } catch { return null; }
+        },
+
+        setupPreactHijacker() {
+            if (this._preactHijackerSetup) return;
+            const preact = window.preact || window.Preact;
+            if (!preact || !preact.options) return;
+            const options = preact.options;
+            this._origDiffed = options.diffed;
+            this._origCommit = options.__c;
+            const self = this;
+            let hijackTimer = null;
+            options.diffed = function(vnode) {
+                if (self.isFileListVNode(vnode)) {
+                    clearTimeout(hijackTimer);
+                    hijackTimer = setTimeout(() => { self._scheduleHijack(); }, 30);
+                }
+                if (self._origDiffed) self._origDiffed(vnode);
+            };
+            options.__c = function(vnode, commitQueue) {
+                if (self.isFileListVNode(vnode)) {
+                    clearTimeout(hijackTimer);
+                    hijackTimer = setTimeout(() => { self._scheduleHijack(); }, 10);
+                }
+                if (self._origCommit) self._origCommit(vnode, commitQueue);
+            };
+            this._preactHijackerSetup = true;
+        },
+
+        isFileListVNode(vnode) {
+            if (!vnode) return false;
+            if (vnode.type === 'ul' || vnode.type === 'div') {
+                const className = vnode.props?.className || '';
+                if (typeof className === 'string' && /file|list|entries/.test(className)) return true;
+            }
+            if (vnode.__k && Array.isArray(vnode.__k)) {
+                for (const child of vnode.__k) {
+                    if (child && child.type === 'li') {
+                        const cls = child.props?.className || '';
+                        if (typeof cls === 'string' && cls.includes('file')) return true;
+                    }
+                }
+            }
+            return false;
+        },
+
+        _scheduleHijack() {
+            if (this._hijackTimeoutId) clearTimeout(this._hijackTimeoutId);
+            this._hijackTimeoutId = setTimeout(() => {
+                this._hijackTimeoutId = null;
+                this.hijackAllIcons();
+            }, 20);
+        },
+
+        hasDocInCurrentList() {
+            const fileItems = document.querySelectorAll('li.file');
+            for (const li of fileItems) {
+                const a = li.querySelector('a[href]');
+                const name = a?.textContent?.trim();
+                if (name && isDocName(name)) return true;
+            }
+            return false;
+        },
+
+        hijackAllIcons() {
+            if (!DOC_EXT_RE) return;
+            if (!this.hasDocInCurrentList()) return;
+            const fileItems = document.querySelectorAll('li.file:not([data-dv-icon-hijacked="true"])');
+            for (const li of fileItems) {
+                const a = li.querySelector('a[href]');
+                const name = a?.textContent?.trim();
+                if (!name || !isDocName(name)) continue;
+                const icon = li.querySelector('span.icon, [class*="media-icon"]');
+                if (!icon) continue;
+                li.dataset.dvIconHijacked = 'true';
+                const entry = this.findEntryByLink(a);
+                icon.style.cursor = 'pointer';
+                icon.title = 'Edit with Doc-viewer';
+                this.hijackElementClicks(icon, entry);
+            }
+        },
+
+        hijackElementClicks(element, entry) {
+            if (!element || this.hijackedIcons.has(element)) return;
+            this.hijackedIcons.add(element);
+            const handler = (e) => {
+                e.stopImmediatePropagation();
+                e.stopPropagation();
+                e.preventDefault();
+                this.openEntry(entry);
+            };
+            element.addEventListener('click', handler, true);
+        },
+
+        openEntry(entry) {
+            if (!entry) return;
+            if (typeof this._openDialog === 'function') {
+                this._openDialog(entry);
+            } else {
+                const a = document.createElement('a');
+                a.href = entry.uri;
+                a.target = '_blank';
+                a.click();
+            }
+        },
+
+        setupGlobalClickInterceptor() {
+            if (this._globalInterceptorSetup) return;
+            this._globalInterceptorSetup = true;
+            const self = this;
+            document.addEventListener('click', function(e) {
+                if (!DOC_EXT_RE) return;
+                const target = e.target.closest('li.file');
+                if (!target) return;
+                if (target.dataset.dvIconHijacked === 'true') return;
+                const a = target.querySelector('a[href]');
+                if (!a) return;
+                const name = a.textContent?.trim();
+                if (!name || !isDocName(name)) return;
+                const icon = target.querySelector('span.icon, [class*="media-icon"]');
+                if (!icon || !icon.contains(e.target)) return;
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                e.stopPropagation();
+                const entry = self.findEntryByLink(a);
+                self.openEntry(entry);
+                target.dataset.dvIconHijacked = 'true';
+            }, true);
+        },
+
+        startObserver() {
+            if (this._observer) return;
+            const self = this;
+            let debounce = null;
+            this._observer = new MutationObserver((mutations) => {
+                let shouldHijack = false;
+                for (const m of mutations) {
+                    if (m.type === 'childList' && m.addedNodes.length > 0) {
+                        for (const node of m.addedNodes) {
+                            if (node.nodeType === 1) {
+                                if (node.querySelector && (
+                                    node.querySelector('li.file') ||
+                                    node.classList.contains('file') ||
+                                    node.classList.contains('list-wrapper') ||
+                                    node.querySelector('.icon')
+                                )) { shouldHijack = true; break; }
+                            }
+                        }
+                    }
+                    if (shouldHijack) break;
+                }
+                if (shouldHijack) {
+                    clearTimeout(debounce);
+                    debounce = setTimeout(() => {
+                        if (self.hasDocInCurrentList()) self.hijackAllIcons();
+                    }, 100);
+                }
+            });
+            this._observer.observe(document.body, { childList: true, subtree: true });
+        },
+
+        start() {
+            if (!DOC_EXT_RE) return;
+            [200, 500, 1000, 2000, 3000].forEach(d => setTimeout(() => this.hijackAllIcons(), d));
+            this.startObserver();
+            this.setupPreactHijacker();
+            this.setupGlobalClickInterceptor();
+        },
+    };
+
+    // ============================================================
+    // HistoryDialog（不變）
     // ============================================================
     function HistoryDialog({ uri, encoding, onClose, onRestore }) {
         const [tab, setTab] = React.useState('versions');
@@ -171,8 +399,6 @@
         const [currentDraft, setCurrentDraft] = React.useState(null);
         const [loading, setLoading] = React.useState(true);
         const [preview, setPreview] = React.useState(null);
-        const [editingLabel, setEditingLabel] = React.useState(null);
-        const [labelValue, setLabelValue] = React.useState('');
 
         async function refresh() {
             setLoading(true);
@@ -198,7 +424,7 @@
                 const d = await apiPost('getVersion', { uri, id: v.id });
                 setPreview({
                     title: 'Version' + (v.label ? ' · ' + v.label : '') + ' · ' + new Date(v.timestamp).toLocaleString(),
-                    content: b64ToUtf8(d.content, encoding),
+                    content: d.content || '',
                 });
             } catch { HFS.toast('Failed to load version', 'error'); }
         }
@@ -214,7 +440,7 @@
                     const d = await apiPost('getVersion', { uri, id: it.versionId });
                     setPreview({
                         title: 'Meta · ' + new Date(it.ts).toLocaleString(),
-                        content: b64ToUtf8(d.content, encoding),
+                        content: d.content || '',
                     });
                 }
             } catch { HFS.toast('Failed to load', 'error'); }
@@ -238,11 +464,9 @@
                 await refresh();
             } catch { HFS.toast('Failed', 'error'); }
         }
-        async function startRename(item) { setEditingLabel(item.id); setLabelValue(item.label || ''); }
-        async function saveRename(item) {
+        async function updateLabel(item, label) {
             try {
-                await apiPost('updateVersionMeta', { uri, id: item.id, label: labelValue.trim() || null });
-                setEditingLabel(null);
+                await apiPost('updateVersionMeta', { uri, id: item.id, label: label || null });
                 await refresh();
             } catch { HFS.toast('Failed', 'error'); }
         }
@@ -253,50 +477,90 @@
             catch { HFS.toast('Failed', 'error'); }
         }
 
-        const VersionRow = React.memo(function VersionRow({ v, editingLabel, labelValue, setLabelValue, toggleFlag, startRename, saveRename, previewVersion, doRestore, deleteVersion, encoding }) {
+        const VersionRow = React.memo(function VersionRow(props) {
+            const { v } = props;
+            const [editing, setEditing] = React.useState(false);
+            const [draftLabel, setDraftLabel] = React.useState(v.label || '');
+            const inputRef = React.useRef(null);
             const flagged = !!(v.starred || v.locked);
+
+            React.useEffect(() => {
+                if (!editing) setDraftLabel(v.label || '');
+            }, [v.label, editing]);
+
+            React.useEffect(() => {
+                if (editing && inputRef.current) {
+                    inputRef.current.focus();
+                    inputRef.current.select();
+                }
+            }, [editing]);
+
+            async function commit() {
+                const val = draftLabel.trim();
+                setEditing(false);
+                if ((v.label || '') !== val) {
+                    await props.updateLabel(v, val);
+                }
+            }
+            function cancel() {
+                setEditing(false);
+                setDraftLabel(v.label || '');
+            }
+
             return React.createElement('div', { className: 'dv-history-row' },
                 React.createElement('button', {
                     className: 'dv-history-flag' + (flagged ? ' flagged' : ''),
-                    onClick: () => toggleFlag(v),
+                    onClick: () => props.toggleFlag(v),
                     title: flagged ? 'Important (click to unmark)' : 'Mark as important (kept forever)'
                 }, flagged ? '\uFE0E★' : '\uFE0E☆'),
                 React.createElement('span', { className: 'dv-history-time' }, new Date(v.timestamp).toLocaleString()),
-                editingLabel === v.id ?
-                    React.createElement(React.Fragment, null,
-                        React.createElement('input', {
-                            className: 'dv-history-rename-input',
-                            value: labelValue, autoFocus: true,
-                            onChange: e => setLabelValue(e.target.value),
-                            onKeyDown: e => { if (e.key === 'Enter') saveRename(v); if (e.key === 'Escape') setEditingLabel(null); }
-                        }),
-                        React.createElement('button', { className: 'dv-history-btn', onClick: () => saveRename(v) }, '✓')
-                    ) :
+                editing ?
+                    React.createElement('input', {
+                        key: 'rename-input-' + v.id,
+                        ref: inputRef,
+                        className: 'dv-history-rename-input',
+                        value: draftLabel,
+                        onChange: e => setDraftLabel(e.target.value),
+                        onKeyDown: e => {
+                            if (e.key === 'Enter') { e.preventDefault(); commit(); }
+                            else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+                        },
+                        onBlur: () => { commit(); },
+                    })
+                    :
                     React.createElement('span', {
                         className: 'dv-history-label' + (v.label ? '' : ' no-label'),
-                        onClick: () => startRename(v),
+                        onClick: () => setEditing(true),
                         title: 'Click to rename'
                     }, v.label || '(no label)'),
+                editing ? React.createElement('button', {
+                    key: 'rename-ok-' + v.id,
+                    className: 'dv-history-btn',
+                    onMouseDown: (e) => e.preventDefault(),
+                    onClick: () => commit()
+                }, '✓') : null,
                 React.createElement('span', { className: 'dv-history-size' }, formatBytes(v.size)),
-                React.createElement('button', { className: 'dv-history-btn', onClick: () => previewVersion(v) }, 'Preview'),
+                React.createElement('button', { className: 'dv-history-btn', onClick: () => props.previewVersion(v) }, 'Preview'),
                 React.createElement('button', {
                     className: 'dv-history-btn',
                     onClick: async () => {
                         const d = await apiPost('getVersion', { uri, id: v.id });
-                        doRestore(b64ToUtf8(d.content, encoding));
+                        props.doRestore(d.content || '');
                     }
                 }, 'Restore'),
                 React.createElement('button', {
                     className: 'dv-history-btn danger',
-                    onClick: () => deleteVersion(v),
+                    onClick: () => props.deleteVersion(v),
                     title: 'Delete'
                 }, '×')
             );
         });
 
         const renderVersionRow = (v) => React.createElement(VersionRow, {
-            key: 'v-' + v.id, v, editingLabel, labelValue, setLabelValue,
-            toggleFlag, startRename, saveRename, previewVersion, doRestore, deleteVersion, encoding,
+            key: 'v-' + v.id,
+            v,
+            toggleFlag, updateLabel,
+            previewVersion, doRestore, deleteVersion,
         });
 
         const renderTimelineRow = (it) => {
@@ -313,7 +577,7 @@
                         className: 'dv-history-btn',
                         onClick: async () => {
                             const d = await apiPost('getVersion', { uri, id: it.versionId });
-                            if (d.ok) doRestore(b64ToUtf8(d.content, encoding));
+                            if (d.ok) doRestore(d.content || '');
                         }
                     }, 'Restore') : null
                 );
@@ -386,9 +650,6 @@
         );
     }
 
-    // ============================================================
-    // UnsavedChangesDialog
-    // ============================================================
     function UnsavedChangesDialog({ onSave, onDiscard, onCancel }) {
         return React.createElement('div', {
             className: 'dv-unsaved-backdrop',
@@ -407,57 +668,13 @@
     }
 
     // ============================================================
-    // fileMenu
+    // 編輯器對話框
+    // CACHE_ENABLED = false 時：不顯示 History，不寫草稿，不發 lazyCleanup
     // ============================================================
-    HFS.onEvent('fileMenu', ({ entry: ent }) => {
-        const showCreateFile = ent.isFolder && ent.uri === location.pathname && HFS.state.props.can_upload;
-        if (ent.isFolder && !showCreateFile) return;
-        if (!HFS.state.props.can_upload) return;
-
-        if (!ent.isFolder && Number(ent.s) > limit) {
-            const name = ent.n || ent.name || '';
-            const ext = name.split('.').pop().toLowerCase();
-            const DOC_EXTS = [
-                'txt', 'log', 'nfo', 'readme', 'rtf', 'md', 'markdown', 'tex',
-                'json', 'xml', 'csv', 'tsv', 'yml', 'yaml', 'ini', 'cfg', 'conf',
-                'config', 'properties', 'env', 'toml', 'lock', 'srt', 'vtt', 'ass',
-                'ssa', 'sub', 'template', 'spec', 'webapp', 'arg', 'gitignore',
-                'gitattributes', 'editorconfig', 'dockerignore', 'gradle', 'makefile',
-                'mk', 'css', 'scss', 'sass', 'less', 'js', 'mjs', 'cjs', 'ts',
-                'jsx', 'tsx', 'py', 'rb', 'php', 'pl', 'lua', 'sh', 'bash', 'zsh',
-                'fish', 'bat', 'cmd', 'ps1', 'c', 'h', 'cpp', 'hpp', 'cc', 'hxx',
-                'java', 'kt', 'swift', 'go', 'rs', 'sql', 'graphql', 'gql',
-                'html', 'htm', 'xhtml', 'gcode',
-            ];
-            if (DOC_EXTS.includes(ext)) {
-                return {
-                    label: 'Edit (too large)', icon: 'edit',
-                    onClick() { alert('File too large to edit (' + formatBytes(ent.s) + '). Limit: ' + (limit / 1024 / 1024) + ' MB.'); },
-                };
-            }
-            return;
-        }
-
+    function openEditorDialog(ent) {
         let dialog;
-        const dialogDescriptor = showCreateFile ? {
-            title: 'Create file',
-            Content() {
-                const [f, sf] = r.useState('');
-                return HFS.h(r.Fragment, null,
-                    HFS.h('form', {
-                        onSubmit: (e) => { e.preventDefault(); createFile(ent.uri, f, dialog); },
-                        style: { marginTop: 10 }
-                    },
-                        HFS.h('label', { style: { marginBottom: 10, display: 'block' } }, 'Enter file name'),
-                        HFS.h('input', { name: 'input', onChange(e) { sf(e.target.value); } })
-                    ),
-                    HFS.h('div', { style: { marginTop: 10, display: 'flex', justifyContent: 'flex-end' } },
-                        HFS.h('button', { onClick: () => createFile(ent.uri, f, dialog) }, 'Create')
-                    )
-                );
-            }
-        } : {
-            title: 'Editing ' + ent.name,
+        const dialogDescriptor = {
+            title: 'Editing ' + (ent.name || ent.n || ''),
             Content() {
                 const [value, change] = r.useState('');
                 const [originalContent, setOriginalContent] = r.useState('');
@@ -485,9 +702,7 @@
                 const [searchTerm, setSearchTerm] = r.useState('');
                 const [searchIndex, setSearchIndex] = r.useState(0);
 
-                // A: 高亮节流 —— 即时值 value（textarea）、延迟值 hlInput（pre）
                 const [hlInput, setHlInput] = r.useState('');
-                // C: 视口行范围
                 const [viewStart, setViewStart] = r.useState(0);
                 const [viewEnd, setViewEnd] = r.useState(200);
                 const scrollRef = r.useRef(null);
@@ -497,13 +712,15 @@
                 const draftTimer = r.useRef(null);
                 const lastHistoryTime = r.useRef(0);
                 const dirtyRef = r.useRef(false);
-                const uri = ent.uri;
+                const uri = ent.uri || ent.href || '';
                 const reloadNonceRef = r.useRef(0);
 
                 const prevValueRef = r.useRef('');
                 const initializedRef = r.useRef(false);
                 const undoStackRef = r.useRef([]);
                 const redoStackRef = r.useRef([]);
+
+                const closedRef = r.useRef(false);
 
                 r.useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
 
@@ -522,11 +739,11 @@
                     setRedoStack([]);
                 }
 
-                // 载入文件
                 r.useEffect(() => {
                     let cancelled = false;
                     const nonce = ++reloadNonceRef.current;
                     setLoading(true);
+                    silentLazyCleanup(uri);
                     fetch(uri + (uri.includes('?') ? '&' : '?') + '_=' + Date.now(), { cache: 'no-store' })
                         .then(res => {
                             if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -569,19 +786,37 @@
                     return () => { cancelled = true; };
                 }, [uri, encoding]);
 
+                // 定時 lazy cleanup（只在 cache 開啟時）
+                r.useEffect(() => {
+                    if (loading) return;
+                    if (!uri) return;
+                    if (!CACHE_ENABLED) return;
+                    const id = setInterval(() => {
+                        if (closedRef.current) return;
+                        silentLazyCleanup(uri);
+                    }, AUTO_CLEANUP_INTERVAL_MS);
+                    return () => clearInterval(id);
+                }, [loading, uri]);
+
+                // 關閉保底清理（只在 cache 開啟時）
+                r.useEffect(() => {
+                    return () => {
+                        closedRef.current = true;
+                        if (CACHE_ENABLED && uri) silentLazyCleanup(uri);
+                    };
+                }, [uri]);
+
                 r.useEffect(() => {
                     if (loading) return;
                     setDirty(value !== originalContent);
                 }, [value, originalContent, loading]);
 
-                // A: 120ms debounce 更新 hlInput
                 r.useEffect(() => {
                     if (loading) return;
                     const id = setTimeout(() => setHlInput(value), 120);
                     return () => clearTimeout(id);
                 }, [value, loading]);
 
-                // 草稿保存
                 r.useEffect(() => {
                     if (loading) return;
                     if (draftTimer.current) clearTimeout(draftTimer.current);
@@ -591,7 +826,6 @@
                     return () => { if (draftTimer.current) clearTimeout(draftTimer.current); };
                 }, [value, originalContent, loading, uri]);
 
-                // undo 记录
                 r.useEffect(() => {
                     if (loading) return;
                     if (!initializedRef.current) {
@@ -612,7 +846,6 @@
                     prevValueRef.current = value;
                 }, [value, loading]);
 
-                // E: 缓存搜索结果
                 const searchMatches = React.useMemo(() => findMatches(value, searchTerm), [value, searchTerm]);
                 r.useEffect(() => {
                     if (searchIndex >= searchMatches.length) setSearchIndex(0);
@@ -624,7 +857,6 @@
                     }
                 }, [searchOpen]);
 
-                // C: 滚动监听 → 更新可视行范围（rAF 节流）
                 r.useEffect(() => {
                     const el = scrollRef.current;
                     if (!el) return;
@@ -651,7 +883,6 @@
                     };
                 }, [loading, wrapMode]);
 
-                // 测量行高（首次 + 字号变化）
                 r.useEffect(() => {
                     const el = scrollRef.current;
                     if (!el) return;
@@ -661,12 +892,10 @@
                         const lh = parseFloat(cs.lineHeight);
                         if (isFinite(lh) && lh > 0) lineHeightRef.current = lh;
                     }
-                    // 触发一次重算
                     const ev = new Event('scroll');
                     el.dispatchEvent(ev);
                 }, [fontScale, loading]);
 
-                // 搜索定位滚动
                 r.useEffect(() => {
                     if (!searchOpen || searchMatches.length === 0) return;
                     const m = searchMatches[searchIndex];
@@ -692,11 +921,7 @@
                     } catch (e) {}
                 }, [searchIndex, searchMatches, searchOpen, value]);
 
-                // ============================================================
-                // E: useMemo 缓存 theme（高亮输出）
-                // 优先级：搜索开 → wrapSearch；高亮开且未超阈值 → 视口高亮；否则 → 纯转义
-                // ============================================================
-                const ext = (ent.name || '').split('.').pop().toLowerCase();
+                const ext = (ent.name || ent.n || '').split('.').pop().toLowerCase();
                 const hlHardDisabled = value.length > HL_HARD_MAX;
                 const hlActive = !searchOpen && highlightOn && !hlHardDisabled;
                 const theme = React.useMemo(() => {
@@ -713,7 +938,6 @@
                     return () => buildViewportHighlight(hlInput, viewStart, viewEnd, highlighter);
                 }, [hlInput, value, searchOpen, searchMatches, searchIndex, hlActive, ext, viewStart, viewEnd]);
 
-                // E: 缓存 charCount（延迟到 idle）
                 const [charCount, setCharCount] = r.useState({ chars: 0, lines: 0 });
                 r.useEffect(() => {
                     let cancelled = false;
@@ -741,9 +965,11 @@
                         .then(() => {
                             setOriginalContent(savedValue);
                             setDirty(false);
-                            clearDraft(uri);
-                            apiPost('recordVersion', { uri, content: savedValue })
-                                .catch(e => console.warn('[doc-viewer] recordVersion failed', e));
+                            if (CACHE_ENABLED) {
+                                clearDraft(uri);
+                                apiPost('recordVersion', { uri, content: savedValue })
+                                    .catch(e => console.warn('[doc-viewer] recordVersion failed', e));
+                            }
                             if (HFS.reloadList) HFS.reloadList();
                             return true;
                         })
@@ -909,7 +1135,8 @@
 
                 return HFS.h('div', { className: 'dv-workspace' }, [
                     HFS.h('span', { key: 'title-actions', className: 'dv-title-actions' }, [
-                        HFS.h('button', {
+                        // History 按鈕：只在 cache 開啟時顯示
+                        CACHE_ENABLED && HFS.h('button', {
                             key: 'history', type: 'button', title: 'History (Versions / Timeline)',
                             className: 'dv-btn dv-btn-wide',
                             onClick: () => setHistoryOpen(true)
@@ -929,7 +1156,7 @@
                         lastModified && HFS.h('span', {
                             key: 'lm', className: 'dv-title-lastmod', title: 'Last modified'
                         }, '· ' + formatDate(lastModified)),
-                    ]),
+                    ].filter(Boolean)),
                     HFS.h('div', { key: 'toolbar', className: 'dv-toolbar' }, [
                         HFS.h('span', { key: 'dirty', className: 'dv-toolbar-dirty' + (dirty ? '' : ' hidden') }, '●'),
                         dirty && HFS.h('span', { key: 'ns', className: 'dv-toolbar-unsaved-label' }, 'not saved'),
@@ -992,7 +1219,6 @@
                         ref: scrollRef,
                         className: 'dv-editor-scroll' + (wrapMode === 'off' ? ' no-wrap' : '')
                     }, [
-                        // E: key 固定，不再随 wrap/search/highlight 重挂载
                         HFS.h(Editor, {
                             key: 'ce',
                             value, onValueChange: change, highlight: theme,
@@ -1014,7 +1240,7 @@
                             onKeyDown,
                         })
                     ]),
-                    historyOpen && HFS.h(HistoryDialog, {
+                    CACHE_ENABLED && historyOpen && HFS.h(HistoryDialog, {
                         key: 'history-dialog',
                         uri, encoding,
                         onClose: () => setHistoryOpen(false),
@@ -1031,18 +1257,65 @@
                         onDiscard: handlePromptDiscard,
                         onCancel: handlePromptCancel,
                     }),
-                ]);
+                ].filter(Boolean));
             }
         };
 
-        return {
-            label: showCreateFile ? 'Create file' : 'Edit',
-            icon: showCreateFile ? 'file' : 'edit',
-            onClick() {
-                dialog = HFS.dialogLib.newDialog(dialogDescriptor);
-                setTimeout(setupFullscreenDialog, 100);
-                setTimeout(setupFullscreenDialog, 300);
+        dialog = HFS.dialogLib.newDialog(dialogDescriptor);
+        setTimeout(setupFullscreenDialog, 100);
+        setTimeout(setupFullscreenDialog, 300);
+    }
+
+    HFS.onEvent('fileMenu', ({ entry: ent }) => {
+        const showCreateFile = ent.isFolder && ent.uri === location.pathname && HFS.state.props.can_upload;
+        if (ent.isFolder && !showCreateFile) return;
+        if (!HFS.state.props.can_upload) return;
+
+        if (!ent.isFolder && Number(ent.s) > limit) {
+            const name = ent.n || ent.name || '';
+            if (isDocName(name)) {
+                return {
+                    label: 'Edit (too large)', icon: 'edit',
+                    onClick() { alert('File too large to edit (' + formatBytes(ent.s) + '). Limit: ' + (limit / 1024 / 1024) + ' MB.'); },
+                };
             }
+            return;
+        }
+
+        if (showCreateFile) {
+            let dialog;
+            return {
+                label: 'Create file',
+                icon: 'file',
+                onClick() {
+                    dialog = HFS.dialogLib.newDialog({
+                        title: 'Create file',
+                        Content() {
+                            const [f, sf] = r.useState('');
+                            return HFS.h(r.Fragment, null,
+                                HFS.h('form', {
+                                    onSubmit: (e) => { e.preventDefault(); createFile(ent.uri, f, dialog); },
+                                    style: { marginTop: 10 }
+                                },
+                                    HFS.h('label', { style: { marginBottom: 10, display: 'block' } }, 'Enter file name'),
+                                    HFS.h('input', { name: 'input', onChange(e) { sf(e.target.value); } })
+                                ),
+                                HFS.h('div', { style: { marginTop: 10, display: 'flex', justifyContent: 'flex-end' } },
+                                    HFS.h('button', { onClick: () => createFile(ent.uri, f, dialog) }, 'Create')
+                                )
+                            );
+                        }
+                    });
+                }
+            };
+        }
+
+        if (!isDocName(ent.n || ent.name || '')) return;
+
+        return {
+            label: 'Edit',
+            icon: 'edit',
+            onClick() { openEditorDialog(ent); }
         };
     });
 
@@ -1106,6 +1379,44 @@
         return backdrop;
     }
 
-    window.DocViewer = { version: '8.0.0', config: cfg };
-    console.log('[doc-viewer] loaded, version 8.0.0');
+    IconHijack._openDialog = openEditorDialog;
+    IconHijack.start();
+    HFS.onEvent('afterList', () => {
+        setTimeout(() => IconHijack.hijackAllIcons(), 50);
+        setTimeout(() => IconHijack.hijackAllIcons(), 300);
+        setTimeout(() => IconHijack.hijackAllIcons(), 800);
+    });
+
+    HFS.onEvent('configChanged', (newCfg) => {
+        if (!newCfg) return;
+        // 總開關變更 → 提示重載
+        if ('autoBackup' in newCfg) {
+            const newCacheEnabled = newCfg.autoBackup !== false;
+            if (newCacheEnabled !== CACHE_ENABLED) {
+                if (confirm('Cache master switch changed. Reload page to apply?')) {
+                    location.reload();
+                }
+                return;
+            }
+        }
+        if ('editableExts' in newCfg) {
+            const oldExts = EDITABLE_EXTS.join(',');
+            const newExts = parseEditableExts(newCfg.editableExts).join(',');
+            if (oldExts !== newExts) {
+                if (confirm('Editable extension list changed. Reload page to apply?')) {
+                    location.reload();
+                }
+            }
+        }
+    });
+
+    window.DocViewer = {
+        version: '8.5.0',
+        config: cfg,
+        cacheEnabled: CACHE_ENABLED,
+        editableExts: EDITABLE_EXTS,
+        openEditorDialog,
+        IconHijack,
+    };
+    console.log('[doc-viewer] loaded, version 8.5.0, cacheEnabled:', CACHE_ENABLED, 'editableExts:', EDITABLE_EXTS);
 }

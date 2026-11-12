@@ -80,36 +80,79 @@
     }
 
     // ============================================================
-    // 通用：单遍 alternation 高亮器工厂
-    // 规则数组：[{ re, rep }]，按顺序用一个大 regex 匹配，回调返回对应 HTML
+    // 精确计算正则源码中的捕获组数量
+    // 跳过 (?: (?= (?! (?<= (?<! 及字符类 [...] 内部
+    // 计入普通组 ( ... ) 与命名组 (?<name> ... )
     // ============================================================
-    function buildHighlight(code, rules, fallbackEscape) {
+    function countCaptureGroups(src) {
+        let count = 0;
+        let inClass = false;
+        for (let i = 0; i < src.length; i++) {
+            const c = src[i];
+            if (c === '\\') { i++; continue; }
+            if (inClass) {
+                if (c === ']') inClass = false;
+                continue;
+            }
+            if (c === '[') { inClass = true; continue; }
+            if (c === '(') {
+                const n1 = src[i + 1];
+                if (n1 === '?') {
+                    const n2 = src[i + 2];
+                    if (n2 === ':' || n2 === '=' || n2 === '!') continue; // 非捕获
+                    if (n2 === '<') {
+                        const n3 = src[i + 3];
+                        if (n3 === '=' || n3 === '!') continue; // lookbehind
+                        // (?<name> 命名捕获组 → 计数
+                    }
+                }
+                count++;
+            }
+        }
+        return count;
+    }
+
+    // ============================================================
+    // 通用：单遍 alternation 高亮器工厂（修复版）
+    // 每条规则包一层外層组；精确记录其 arguments 索引，
+    // 避免 YAML/XML 这类多捕获组规则索引错位。
+    // ============================================================
+    function buildHighlight(code, rules) {
         if (code.length > MAX_HL_CHARS) {
             return wrapColorsInHtml(escapeHtml(code));
         }
-        const src = code; // 已在调用前 escape？
-        // 这里要求传入的是「原文」，内部先 escape，再按 escaped 文本用规则匹配
-        // 但规则里含 &quot; 等实体，需对 escaped 文本操作
-        const esc = escapeHtml(code);
-        // 合并正则：每条规则一个命名组
-        const parts = [];
-        const map = [];
-        for (let i = 0; i < rules.length; i++) {
-            parts.push('(' + rules[i].re.source + ')');
-            map.push(rules[i].rep);
+        if (!rules || rules.length === 0) {
+            return wrapColorsInHtml(escapeHtml(code));
         }
-        if (parts.length === 0) return wrapColorsInHtml(esc);
-        const merged = new RegExp(parts.join('|'), 'gm');
+        const esc = escapeHtml(code);
+        const parts = [];
+        const ruleGroupIndex = [];
+        let groupOffset = 0; // 已消耗的捕获组数（不含 arguments[0]）
+        for (let i = 0; i < rules.length; i++) {
+            const src = rules[i].re.source;
+            parts.push('(' + src + ')');
+            ruleGroupIndex.push(groupOffset + 1);
+            groupOffset += 1 + countCaptureGroups(src);
+        }
+        let merged;
+        try {
+            merged = new RegExp(parts.join('|'), 'gm');
+        } catch (e) {
+            return wrapColorsInHtml(esc);
+        }
         const out = esc.replace(merged, function () {
-            for (let i = 0; i < map.length; i++) {
-                // 找到第一个命中的组
-                if (arguments[i + 1] !== undefined) {
-                    const matched = arguments[0];
-                    // 规则回调：fn(matched, group) => html
-                    return map[i](matched);
+            const matched = arguments[0];
+            for (let i = 0; i < rules.length; i++) {
+                if (arguments[ruleGroupIndex[i]] !== undefined) {
+                    try {
+                        const r = rules[i].rep(matched);
+                        return r == null ? matched : r;
+                    } catch (e) {
+                        return matched;
+                    }
                 }
             }
-            return arguments[0];
+            return matched;
         });
         return wrapColorsInHtml(out);
     }
@@ -141,7 +184,7 @@
     function highlightJavaScript(code) {
         const rules = [
             { re: /`(?:\\.|[^`\\])*`/, rep: m => span(C.string, m) },
-            { re: /(^|[^\w$)\]}\s])\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\n])+\/[gimsuy]*/, rep: m => m.replace(/(^[^\w$)\]}\s]?)/, '$1') },
+            { re: /(^|[^\w$)\]}\s])\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\n])+\/[gimsuy]*/, rep: m => m },
             { re: /\/\/[^\n]*|\/\*[\s\S]*?\*\//, rep: m => span(C.comment, m) },
             { re: /&quot;(?:\\.|[^&\\])*?&quot;|&#39;(?:\\.|[^&\\])*?&#39;/, rep: m => span(C.string, m) },
             { re: /\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/, rep: m => span(C.number, m) },
@@ -185,7 +228,7 @@
             { re: /^(\s*)(-)(\s)/m, rep: m => m.replace(/^(\s*)(-)(\s)/, (_, i, d, s) => i + span(C.keyword, d) + s) },
             { re: /^(\s*)(&quot;[^&\n]*?&quot;|&#39;[^&\n]*?&#39;)(\s*:)/m, rep: m => m.replace(/^(\s*)(&quot;[^&\n]*?&quot;|&#39;[^&\n]*?&#39;)(\s*:)/, (_, i, k, c) => i + span(C.variable, k) + span(C.punctuation, c)) },
             { re: /^(\s*)([^\s#\-][^:\n]*?)(\s*:)(?=\s|$)/m, rep: m => m.replace(/^(\s*)([^\s#\-][^:\n]*?)(\s*:)/, (_, i, k, c) => i + span(C.variable, k) + span(C.punctuation, c)) },
-            { re: /(^|[ \t])([&*][\w-]+)/, rep: m => m.replace(/^(.*?)(&[&*][\w-]+|\*[&*][\w-]+)$/, (_, p, n) => p + span(C.type, n)) },
+            { re: /(^|[ \t])(&amp;[\w-]+|\*[\w-]+)/, rep: m => m.replace(/^(.*?)(&amp;[\w-]+|\*[\w-]+)$/, (_, p, n) => p + span(C.type, n)) },
             { re: /(^|[ \t])(!![\w:/-]+)/, rep: m => m.replace(/^(.*?)(!![\w:/-]+)$/, (_, p, t) => p + span(C.tag, t)) },
             { re: /&#39;(?:[^&\n]|&amp;)*?&#39;/, rep: m => span(C.string, m) },
             { re: /&quot;(?:\\.|[^&\\])*?&quot;/, rep: m => span(C.string, m) },
