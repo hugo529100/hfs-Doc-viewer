@@ -1,0 +1,1031 @@
+/* ---------- Code editor textarea ---------- */
+.npm__react-simple-code-editor__textarea {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace !important;
+    outline: none !important;
+    border: none !important;
+    resize: none !important;
+    box-sizing: border-box !important;
+    color: transparent !important;
+    caret-color: var(--text) !important;
+}
+
+.npm__react-simple-code-editor__textarea::selection {
+    background: var(--ghost-contrast) !important;
+    color: transparent !important;
+}
+
+/* ============================================================
+   Fullscreen editor dialog
+   ============================================================ */
+.dialog-backdrop.dv-dialog-fullscreen {
+    padding: 0;
+    align-items: stretch;
+    justify-content: stretch;
+}
+
+.dialog-backdrop.dv-dialog-fullscreen .dialog,
+.dialog-backdrop.dv-dialog-fullscreen .dialog.contain,
+.dialog-backdrop.dv-dialog-fullscreen .dialog[role="dialog"] {
+    width: 100vw;
+    height: 100vh;
+    max-width: 100vw;
+    max-height: 100vh;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-sizing: border-box;
+    background: var(--bg);
+    color: var(--text);
+    border: none;
+    position: relative;            /* ★ 控件组绝对定位的参考容器 */
+}
+
+.dialog-backdrop.dv-dialog-fullscreen .dialog-title {
+    margin: 0;
+    padding: 0 40px 0 250px;      /* 左侧留给控件组 */
+    font-size: 13px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--faint-contrast);
+    flex: 0 0 auto;
+    position: relative;            /* 标题行自身也作为参考 */
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    height: 28px;                  /* 固定高度，与控件组严格一致 */
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    top: -16px;
+}
+
+.dialog-backdrop.dv-dialog-fullscreen .dialog-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    margin-top: -12px;
+}
+
+.dialog-backdrop.dv-dialog-fullscreen .dialog-closer,
+.dialog-backdrop.dv-dialog-fullscreen .dialog-icon.dialog-closer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 1.6em;
+    height: 1.6em;
+    padding: 0;
+    border: none;
+    background-color: var(--faint-contrast);
+    color: var(--text);
+    font-size: 1rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    font-family: inherit;
+    line-height: 1;
+    transition: background-color 0.15s ease;
+}
+
+.dialog-backdrop.dv-dialog-fullscreen .dialog-closer:hover {
+    background-color: var(--text);
+    color: var(--bg);
+}
+
+/* ============================================================
+   Title actions (History / Undo / Redo / Last modified)
+   — 绝对定位嵌入标题行，与标题行严格同顶、同高、垂直居中
+   ============================================================ */
+.dialog-backdrop.dv-dialog-fullscreen .dv-title-actions {
+    position: absolute;
+    top: 0;                        /* 与 30px 标题行顶端对齐 */
+    left: 8px;
+    height: 30px;                  /* ★ 与标题行高度严格一致 */
+    display: flex;
+    align-items: center;           /* 垂直居中 */
+    gap: 4px;
+    padding: 0;
+    z-index: 60;
+    background: transparent;
+    pointer-events: auto;
+    box-sizing: border-box;
+    max-width: calc(250px - 16px);
+    min-width: 0;
+}
+
+/* 标题行按钮压缩：高度 20px、内边距更小 */
+.dv-title-actions .dv-btn {
+    height: 20px;
+    font-size: 11px;
+    padding: 1px 6px;
+    line-height: 1;
+}
+.dv-title-actions .dv-btn-wide {
+    font-size: 10px;
+    padding: 1px 7px;
+}
+.dv-title-actions .dv-btn-icon {
+    font-size: 12px;
+    padding: 1px 5px;
+}
+
+/* 最后修改时间（跟在 History/Undo/Redo 后面，即文件名左侧） */
+.dv-title-lastmod {
+    font-size: 10px;
+    opacity: 0.6;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    max-width: 110px;
+    color: var(--text);
+    margin-left: 2px;
+    flex-shrink: 1;
+}
+
+/* ============================================================
+   Editor workspace
+   ============================================================ */
+.dv-workspace {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    gap: 8px;
+    padding: 4px;
+    box-sizing: border-box;
+}
+
+/* 工具栏：允许换行；Save 永远占位，出现时不会撑破容器 */
+.dv-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    background: var(--ghost-contrast);
+    border-radius: 4px;
+    font-size: 11px;
+    flex-wrap: wrap;
+    row-gap: 4px;
+    flex: 0 0 auto;
+    color: var(--text);
+    overflow: visible;
+    min-width: 0;
+    min-height: 28px;
+    box-sizing: border-box;
+}
+
+.dv-toolbar-dirty {
+    color: var(--text);
+    font-size: 14px;
+    flex-shrink: 0;
+}
+.dv-toolbar-dirty.hidden {
+    color: transparent;
+}
+
+.dv-toolbar-unsaved-label {
+    font-size: 11px;
+    font-style: italic;
+    color: var(--text);
+    flex-shrink: 0;
+}
+
+/* 字数统计（size 左侧） */
+.dv-toolbar-charcount {
+    font-size: 10px;
+    opacity: 0.6;
+    white-space: nowrap;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.dv-toolbar-size {
+    font-size: 10px;
+    opacity: 0.6;
+    white-space: nowrap;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+/* 右侧按钮组：空间不足时按鈕换行，而不是溢出 */
+.dv-toolbar-right {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    flex-shrink: 0;
+    margin-left: auto;
+    white-space: nowrap;
+    max-width: 100%;
+    min-width: 0;
+}
+
+.dv-btn {
+    font-size: 11px;
+    padding: 2px 7px;
+    cursor: pointer;
+    background: var(--button-bg);
+    color: var(--button-text);
+    border: 1px solid var(--faint-contrast);
+    border-radius: 3px;
+    font-family: inherit;
+    transition: all 0.15s ease;
+    height: 20px;
+    line-height: 1;
+    box-sizing: border-box;
+}
+
+.dv-btn:hover:not(:disabled) {
+    background: var(--faint-contrast);
+    border-color: var(--text);
+}
+
+.dv-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.dv-btn-wide {
+    font-size: 11px;
+    padding: 3px 10px;
+}
+
+.dv-btn-zoom {
+    font-size: 11px;
+    padding: 3px 6px;
+    font-weight: 600;
+}
+
+.dv-btn-icon {
+    font-size: 13px;
+    padding: 3px 6px;
+}
+
+.dv-btn-wrap {
+    font-size: 13px;
+    padding: 3px 8px;
+}
+
+.dv-btn-wrap.active {
+    background: var(--ghost-contrast);
+    border-color: var(--text);
+    font-weight: 600;
+}
+
+.dv-btn-hl {
+    font-size: 13px;
+    padding: 3px 6px;
+}
+
+.dv-btn-hl.active {
+    background: var(--ghost-contrast);
+    border-color: var(--text);
+}
+
+.dv-btn-save {
+    font-size: 11px;
+    padding: 3px 10px;
+    background: var(--ghost-contrast);
+    color: var(--text);
+    border: 1px solid var(--text);
+    border-radius: 3px;
+    cursor: pointer;
+    font-weight: 600;
+    height: 18px;
+}
+
+.dv-btn-save:hover:not(:disabled) {
+    background: var(--text);
+    color: var(--bg);
+}
+
+/* Save 永远占位；非 dirty 时淡化為 faint-contrast */
+.dv-btn-save.dv-btn-save-idle,
+.dv-btn-save:disabled {
+    background: transparent;
+    color: var(--faint-contrast);
+    border-color: var(--faint-contrast);
+    cursor: default;
+    font-weight: 400;
+    opacity: 1;
+}
+
+.dv-btn-save.dv-btn-save-idle:hover,
+.dv-btn-save:disabled:hover {
+    background: transparent;
+    color: var(--faint-contrast);
+    border-color: var(--faint-contrast);
+}
+
+.dv-encoding-select {
+    font-size: 10px;
+    font-family: inherit;
+    padding: 0 2px;
+    height: 20px;
+    line-height: 18px;
+    width: 64px;
+    min-width: 64px;
+    max-width: 64px;
+    box-sizing: border-box;
+    background: var(--button-bg);
+    color: var(--button-text);
+    border: 1px solid var(--faint-contrast);
+    border-radius: 3px;
+    cursor: pointer;
+    outline: none;
+    flex-shrink: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.dv-encoding-select:hover {
+    border-color: var(--text);
+}
+
+/* ============================================================
+   Editor scroll container + wrap control
+   ============================================================ */
+.dv-editor-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    background: var(--bg);
+    border: 1px solid var(--faint-contrast);
+    border-radius: 4px;
+    overflow: auto;
+    scrollbar-width: auto;
+    scrollbar-color: var(--faint-contrast) transparent;
+}
+
+.dv-editor-scroll .dv-editor-pre,
+.dv-editor-scroll .dv-editor-textarea {
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    overflow-wrap: break-word !important;
+}
+
+.dv-editor-scroll.no-wrap {
+    overflow-x: auto;
+    overflow-y: auto;
+}
+
+.dv-editor-scroll.no-wrap .dv-editor-pre,
+.dv-editor-scroll.no-wrap .dv-editor-textarea {
+    white-space: pre !important;
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+    width: max-content !important;
+    min-width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+.dv-editor-scroll.no-wrap .dv-editor-textarea {
+    overflow-x: hidden !important;
+    overflow-y: hidden !important;
+}
+
+.dv-editor-scroll.no-wrap .dv-editor-pre {
+    overflow: visible !important;
+}
+
+.dv-loading {
+    padding: 40px;
+    text-align: center;
+    opacity: 0.7;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text);
+}
+
+/* ============================================================
+   Scrollbars (theme-aware)
+   ============================================================ */
+.dv-editor-scroll::-webkit-scrollbar,
+.dv-history-list::-webkit-scrollbar,
+.dv-history-preview-content::-webkit-scrollbar,
+.dv-workspace::-webkit-scrollbar,
+.dialog-backdrop.dv-dialog-fullscreen .dialog-content::-webkit-scrollbar,
+.dv-editor-scroll .dv-editor-textarea::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+.dv-editor-scroll::-webkit-scrollbar-track,
+.dv-history-list::-webkit-scrollbar-track,
+.dv-history-preview-content::-webkit-scrollbar-track,
+.dv-workspace::-webkit-scrollbar-track,
+.dialog-backdrop.dv-dialog-fullscreen .dialog-content::-webkit-scrollbar-track,
+.dv-editor-scroll .dv-editor-textarea::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.dv-editor-scroll::-webkit-scrollbar-thumb,
+.dv-history-list::-webkit-scrollbar-thumb,
+.dv-history-preview-content::-webkit-scrollbar-thumb,
+.dv-workspace::-webkit-scrollbar-thumb,
+.dialog-backdrop.dv-dialog-fullscreen .dialog-content::-webkit-scrollbar-thumb,
+.dv-editor-scroll .dv-editor-textarea::-webkit-scrollbar-thumb {
+    background: var(--faint-contrast);
+    border-radius: 6px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+    min-height: 24px;
+    min-width: 24px;
+}
+
+.dv-editor-scroll::-webkit-scrollbar-thumb:hover,
+.dv-history-list::-webkit-scrollbar-thumb:hover,
+.dv-history-preview-content::-webkit-scrollbar-thumb:hover,
+.dv-workspace::-webkit-scrollbar-thumb:hover,
+.dialog-backdrop.dv-dialog-fullscreen .dialog-content::-webkit-scrollbar-thumb:hover,
+.dv-editor-scroll .dv-editor-textarea::-webkit-scrollbar-thumb:hover {
+    background: var(--text);
+    background-clip: content-box;
+}
+
+.dv-editor-scroll::-webkit-scrollbar-corner,
+.dv-history-list::-webkit-scrollbar-corner,
+.dv-history-preview-content::-webkit-scrollbar-corner,
+.dv-workspace::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* ============================================================
+   History panel (fullscreen)
+   ============================================================ */
+.dv-history-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
+    display: flex;
+    align-items: stretch;
+    justify-content: stretch;
+}
+
+.dv-history-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+}
+
+.dv-history-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--faint-contrast);
+    flex: 0 0 auto;
+    background: var(--ghost-contrast);
+}
+
+.dv-history-title {
+    font-weight: 600;
+    margin-right: auto;
+    font-size: 14px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 50%;
+}
+
+.dv-history-tab {
+    padding: 6px 14px;
+    cursor: pointer;
+    border-radius: 4px;
+    border: 1px solid var(--faint-contrast);
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    font-family: inherit;
+    transition: all 0.15s ease;
+}
+
+.dv-history-tab:hover {
+    background: var(--ghost-contrast);
+    border-color: var(--text);
+}
+
+.dv-history-tab.active {
+    background: var(--ghost-contrast);
+    border-color: var(--text);
+    font-weight: 600;
+}
+
+.dv-history-close {
+    font-size: 20px;
+    padding: 0 12px;
+    cursor: pointer;
+    background: transparent;
+    color: var(--faint-contrast);
+    border: none;
+    line-height: 1;
+    transition: color 0.15s ease;
+}
+
+.dv-history-close:hover {
+    color: var(--text);
+}
+
+.dv-history-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+}
+
+.dv-history-list {
+    flex: 0 0 50%;
+    overflow-y: auto;
+    border-right: 1px solid var(--faint-contrast);
+    scrollbar-width: thin;
+    scrollbar-color: var(--faint-contrast) transparent;
+}
+
+.dv-history-preview {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.dv-history-preview-title {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--faint-contrast);
+    font-size: 12px;
+    opacity: 0.8;
+    flex: 0 0 auto;
+    color: var(--text);
+    background: var(--ghost-contrast);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dv-history-preview-content {
+    flex: 1;
+    margin: 0;
+    padding: 16px;
+    overflow: auto;
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    background: var(--bg);
+    color: var(--text);
+    scrollbar-width: thin;
+    scrollbar-color: var(--faint-contrast) transparent;
+}
+
+.dv-history-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    font-size: 12px;
+    border-bottom: 1px solid var(--faint-contrast);
+    color: var(--text);
+    transition: background 0.15s ease;
+}
+
+.dv-history-row:hover {
+    background: var(--ghost-contrast);
+}
+
+.dv-history-row.current-draft {
+    background: var(--ghost-contrast);
+    border-left: 3px solid var(--text);
+}
+
+.dv-history-time {
+    min-width: 170px;
+    opacity: 0.7;
+    flex-shrink: 0;
+}
+
+.dv-history-label {
+    flex: 1;
+    cursor: pointer;
+    text-decoration: underline dotted;
+    opacity: 0.9;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dv-history-label.no-label {
+    opacity: 0.5;
+    font-style: italic;
+}
+
+.dv-history-kind {
+    flex: 1;
+    opacity: 0.8;
+}
+
+.dv-history-size {
+    opacity: 0.6;
+    min-width: 70px;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.dv-history-btn {
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+    background: var(--button-bg);
+    color: var(--button-text);
+    border: 1px solid var(--faint-contrast);
+    border-radius: 3px;
+    font-family: inherit;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.dv-history-btn:hover {
+    background: var(--faint-contrast);
+    border-color: var(--text);
+}
+
+.dv-history-btn.danger {
+    opacity: 0.75;
+}
+
+.dv-history-btn.danger:hover {
+    opacity: 1;
+    background: var(--text);
+    color: var(--bg);
+}
+
+/* 重要标记（原 star + lock 合并） */
+.dv-history-flag {
+    font-size: 18px;
+    padding: 0 6px;
+    cursor: pointer;
+    line-height: 1;
+    background: transparent;
+    border: none;
+    color: var(--faint-contrast);
+    transition: color 0.15s ease;
+    flex-shrink: 0;
+}
+
+.dv-history-flag.flagged {
+    color: var(--good-contrast);
+}
+
+.dv-history-flag:hover {
+    color: var(--text);
+}
+
+.dv-history-rename-input {
+    flex: 1;
+    padding: 2px 6px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--text);
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 12px;
+    outline: none;
+}
+
+.dv-history-empty {
+    padding: 20px;
+    opacity: 0.6;
+    color: var(--text);
+    text-align: center;
+}
+
+.dv-history-current-draft-empty {
+    padding: 8px 14px;
+    font-size: 12px;
+    font-style: italic;
+    opacity: 0.5;
+    border-bottom: 1px solid var(--faint-contrast);
+    color: var(--text);
+}
+
+/* ============================================================
+   未保存关闭确认对话框
+   ============================================================ */
+.dv-unsaved-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: color-mix(in srgb, var(--bg) 70%, transparent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    box-sizing: border-box;
+}
+
+.dv-unsaved-dialog {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--faint-contrast);
+    border-radius: 8px;
+    max-width: 380px;
+    width: 100%;
+    padding: 20px;
+    box-sizing: border-box;
+}
+
+.dv-unsaved-title {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 10px;
+    color: var(--text);
+}
+
+.dv-unsaved-body {
+    font-size: 13px;
+    line-height: 1.5;
+    opacity: 0.85;
+    margin-bottom: 18px;
+    color: var(--text);
+}
+
+.dv-unsaved-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.dv-unsaved-actions .dv-btn {
+    height: auto;
+    padding: 6px 14px;
+    font-size: 12px;
+}
+
+/* ============================================================
+   颜色代码装饰（v7.5）— 零宽度底部色条（不破坏对齐）
+   ============================================================ */
+.dv-color-token {
+    color: inherit;
+    box-shadow: inset 0 -2px 0 0 var(--dv-color, transparent);
+    text-decoration: underline dotted;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+    text-decoration-color: color-mix(in srgb, var(--dv-color, currentColor) 60%, transparent);
+    font-weight: inherit;
+    padding: 0;
+    margin: 0;
+    border: 0;
+}
+
+.dv-color-keyword {
+    color: inherit;
+    font-style: italic;
+    box-shadow: none;
+    text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
+}
+
+.dv-css-var {
+    font-style: italic;
+    text-decoration: underline dotted;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+    text-decoration-color: color-mix(in srgb, currentColor 35%, transparent);
+    font-weight: 500;
+}
+
+.dv-fence-body {
+    display: inline;
+}
+
+/* ============================================================
+   Mobile
+   ============================================================ */
+@media (max-width: 640px) {
+    .dialog-backdrop.dv-dialog-fullscreen .dialog-title {
+        font-size: 12px;
+        padding: 0 34px 0 160px;   /* 左侧留给控件组 */
+        height: 28px;
+        line-height: 28px;
+    }
+    .dialog-backdrop.dv-dialog-fullscreen .dialog-closer {
+        width: 1.8em;
+        height: 1.8em;
+        font-size: 0.9rem;
+    }
+    .dialog-backdrop.dv-dialog-fullscreen .dv-title-actions {
+        top: 3px;
+        left: 4px;
+        height: 28px;              /* ★ 与移动端标题行严格一致 */
+        gap: 2px;
+        padding: 0;
+        max-width: calc(160px - 8px);
+    }
+    .dv-title-actions .dv-btn {
+        height: 18px;
+        font-size: 10px;
+        padding: 0 4px;
+    }
+    .dv-title-actions .dv-btn-wide {
+        font-size: 9px;
+        padding: 0 5px;
+    }
+    .dv-title-actions .dv-btn-icon {
+        font-size: 11px;
+        padding: 0 4px;
+    }
+    /* 移动端顶栏空间紧张：隐藏最后修改时间 */
+    .dv-title-lastmod {
+        display: none;
+    }
+
+    /* 手机：工具栏允许换行，右侧组整体不拆 */
+    .dv-toolbar {
+        flex-wrap: wrap;
+        padding: 2px 6px;
+        gap: 3px;
+        row-gap: 3px;
+        height: auto;
+        min-height: 26px;
+    }
+    .dv-toolbar-charcount,
+    .dv-toolbar-size {
+        font-size: 9px;
+    }
+    .dv-toolbar-right {
+        margin-left: auto;
+        gap: 3px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        max-width: 100%;
+    }
+    .dv-btn {
+        height: 18px;
+        font-size: 10px;
+        padding: 0 5px;
+    }
+    .dv-encoding-select {
+        font-size: 9px;
+        height: 18px;
+        line-height: 16px;
+        width: 56px;
+        min-width: 56px;
+        max-width: 56px;
+        padding: 0 2px;
+    }
+
+    /* 手机 History：上下分栏，预览移到下半屏 */
+    .dv-history-body {
+        flex-direction: column;
+    }
+    .dv-history-list {
+        flex: 0 0 50%;
+        border-right: none;
+        border-bottom: 1px solid var(--faint-contrast);
+    }
+    .dv-history-preview {
+        display: flex;
+        flex: 1 1 50%;
+        min-height: 0;
+    }
+    .dv-history-time {
+        min-width: 110px;
+        font-size: 11px;
+    }
+    .dv-history-title {
+        max-width: 40%;
+    }
+    .dv-history-row {
+        gap: 5px;
+        padding: 6px 10px;
+        flex-wrap: wrap;
+    }
+    .dv-history-btn {
+        font-size: 10px;
+        padding: 2px 6px;
+    }
+    .dv-history-flag {
+        font-size: 16px;
+        padding: 0 4px;
+    }
+    .dv-history-preview-content {
+        font-size: 12px;
+        padding: 10px;
+    }
+}
+
+/* ============================================================
+   搜索条
+   ============================================================ */
+.dv-searchbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: var(--ghost-contrast);
+    border: 1px solid var(--faint-contrast);
+    border-radius: 4px;
+    flex: 0 0 auto;
+    font-size: 12px;
+    box-sizing: border-box;
+}
+
+.dv-search-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 20px;
+    font-size: 12px;
+    font-family: inherit;
+    padding: 0 6px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--faint-contrast);
+    border-radius: 3px;
+    outline: none;
+    box-sizing: border-box;
+}
+
+.dv-search-input:focus {
+    border-color: var(--text);
+}
+
+.dv-search-count {
+    font-size: 10px;
+    opacity: 0.7;
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-width: 44px;
+    text-align: right;
+}
+
+/* 搜索命中高亮：用背景色 + inset box-shadow，不改变字符宽度 */
+mark.dv-search-hit {
+    background: color-mix(in srgb, var(--text) 50%, transparent);
+    color: var(--bg);
+    padding: 0;
+    margin: 0;
+    border-radius: 2px;
+
+}
+
+mark.dv-search-hit-current {
+    background: color-mix(in srgb, var(--text) 90%, transparent);
+    color: var(--bg);
+
+}
+
+/* 搜索按钮激活态 */
+.dv-btn-icon.active {
+    background: var(--ghost-contrast);
+    border-color: var(--text);
+    font-weight: 600;
+}
+
+@media (max-width: 640px) {
+    .dv-searchbar {
+        padding: 3px 6px;
+        gap: 4px;
+    }
+    .dv-search-input {
+        font-size: 11px;
+        height: 18px;
+    }
+    .dv-search-count {
+        font-size: 9px;
+        min-width: 38px;
+    }
+}
+
+/* 视口虚拟化：占位空行保持行高（pre 已 pre-wrap，\n 直接生效） */
+.dv-editor-pre {
+    /* 确保占位空行不被压缩 */
+    tab-size: 4;
+}
+
+/* 高亮禁用态（文件过大时） */
+.dv-btn-hl:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+/* 优化合成：限制 pre 的重排范围，减少双层结构布局成本 */
+.dv-editor-scroll {
+    contain: layout paint;
+}
+
+.dv-editor-scroll .dv-editor-pre {
+    contain: content;
+}
