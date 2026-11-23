@@ -7,7 +7,8 @@ const crypto = require('crypto');
 
 exports.version = 7.4;
 exports.apiRequired = 8.87;
-exports.repo = "Hug3O/Doc-viewer";
+exports.repo = "hugo529100/hfs-Doc-viewer"
+
 exports.description = "Text editor with fullscreen dialog, saved versions, unified timeline, VSCode theme. Metadata lives next to the file in cache/docviewer/, keyed by filename (no hashes).";
 
 exports.frontend_js = ['editor.js', 'theme.js', 'main.js'];
